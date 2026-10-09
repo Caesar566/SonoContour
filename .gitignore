@@ -1,0 +1,53 @@
+# Patient images, doctor references, annotations, and local spreadsheets
+2.25.*/
+*.dcm
+*.DCM
+*.nrrd
+*.nhdr
+*.nii
+*.nii.gz
+*.xlsx
+*.xls
+*.xlsm
+
+# Local data / distribution archives
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.tar.xz
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Slicer logs and generated test reports (may include case IDs / screenshots)
+*.log
+/tests/reports/
+
+# CMake / Slicer build and packaging output
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+_CPack_Packages/
+
+# Editor temporary files and OS metadata
+*.swp
+*.swo
+*~
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+Desktop.ini
