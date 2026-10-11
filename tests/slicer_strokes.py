@@ -1,5 +1,6 @@
 """Native mouse strokes at fractional diameters; temporary work, no source writes."""
 from pathlib import Path
+import os
 import sys
 import tempfile
 import time
@@ -19,7 +20,8 @@ from BreastContourLib.runtime import named_segments
 def run():
     slicer.util.selectModule('BreastContour')
     widget = slicer.modules.breastcontour.widgetRepresentation().self()
-    source = discover_cases('/home/caesar/Projects/ohslicer')[2]
+    root = Path(os.environ.get('BREAST_CONTOUR_DATA', str(Path(__file__).resolve().parents[1])))
+    source = discover_cases(root)[2]
     reports = []
     with tempfile.TemporaryDirectory(prefix='breast-contour-strokes-') as d:
         folder = Path(d)

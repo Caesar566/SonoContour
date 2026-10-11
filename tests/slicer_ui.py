@@ -40,7 +40,7 @@ def run():
     slicer.util.selectModule("BreastContour")
     widget = slicer.modules.breastcontour.widgetRepresentation().self()
     assert widget.editor
-    data_root = Path(os.environ.get('BREAST_CONTOUR_DATA', '/home/caesar/Projects/ohslicer'))
+    data_root = Path(os.environ.get('BREAST_CONTOUR_DATA', str(Path(__file__).resolve().parents[1])))
     cases = discover_cases(data_root)
     info_original = slicer.util.infoDisplay
     error_original = slicer.util.errorDisplay

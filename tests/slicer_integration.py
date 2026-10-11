@@ -22,7 +22,7 @@ from BreastContourLib.runtime import CaseSession, named_segments
 
 
 def run():
-    root = Path(os.environ.get("BREAST_CONTOUR_DATA", "/home/caesar/Projects/ohslicer"))
+    root = Path(os.environ.get("BREAST_CONTOUR_DATA", str(Path(__file__).resolve().parents[1])))
     def digest(path):
         with path.open('rb') as stream:
             return hashlib.file_digest(stream, 'sha256').hexdigest()

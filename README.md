@@ -2,19 +2,21 @@
 
 为 Linux / 3D Slicer 5.12.4 编写的 Python 模块。提供 Segment Editor 的 Paint / Erase 和智能轮廓操作，输出为**轮廓线像素**，不填充肿瘤内部。
 
+公开源码不包含病例、表格、日志或自动测试报告。发布前请检查上传文件；`.gitignore` 不会删除已经提交的文件或历史中的个人信息。如果使用清理后的源码创建新仓库，请只复制源码，不复制旧 `.git` 目录。
+
 ## 安装
 
 无需编译，也无需安装 Python 包；使用 Slicer 自带的 NumPy、SciPy、VTK 和 Qt。
 
 1. 打开 Slicer 的 **Edit → Application Settings → Modules**。
 2. 在 **Additional module paths** 添加包含 `BreastContour.py` 的目录：
-   `/home/caesar/Projects/ohslicer/BreastContour`。
+   项目中的 `BreastContour` 目录（使用你实际解压位置的完整路径）。
 3. 重启 Slicer，在 **Segmentation → 乳腺超声轮廓标注** 中打开模块。
 
 也可仅对本次运行加载模块：
 
 ```sh
-/opt/3dslicer/Slicer --additional-module-path /home/caesar/Projects/ohslicer/BreastContour
+Slicer --additional-module-path "$PWD/BreastContour"
 ```
 
 项目附带 CMake 配置用于在 Slicer 开发环境打包；日常使用直接添加模块路径即可。
@@ -35,9 +37,9 @@
     Segment.backup-时间戳.nrrd
 ```
 
-模块从表格**阶段三**中读取病例 ID 和“备注”列，保留完整备注。支持如 `2类 138-226/325-347/4A类 229-247/426-389` 的内容：没有新类别的区间继承前一个类别，倒序范围按 `389–426` 处理，重叠区间同时显示。类别只作提示，不自动改变分段。
+模块从表格**阶段三**中读取病例 ID 和“备注”列，保留完整备注。支持如 `2类 10-30/60-70/4A类 35-45/90-55` 的合成示例：没有新类别的区间继承前一个类别，倒序范围按 `55–90` 处理，重叠区间同时显示。类别只作提示，不自动改变分段。文档中的范围均为合成示例。
 
-**帧号使用数组索引，从 0 开始。** 表格中的 138 对应帧索引 138，也就是物理顺序的第 139 帧。图像上同时显示两种计数，避免混淆。
+**帧号使用数组索引，从 0 开始。** 表格中的 10 对应帧索引 10，也就是物理顺序的第 11 帧。图像上同时显示两种计数，避免混淆。
 
 ## 使用
 
@@ -99,13 +101,13 @@ QT_QPA_PLATFORM=offscreen \
   --python-script "$PWD/tests/slicer_ui.py"
 ```
 
-默认测试数据位置为 `/home/caesar/Projects/ohslicer`；独立和集成测试可通过 `BREAST_CONTOUR_DATA` 指定其他数据根目录。详见 `TEST_RESULTS.md`。
+默认测试数据位置为项目根目录；独立和集成测试可通过 `BREAST_CONTOUR_DATA` 指定其他数据根目录。真实病例和表格不随源码发布，纯算法测试无需病例数据。详见 `TEST_RESULTS.md`。
 
 实现参考：[Segment Editor 参数接口](https://slicer.readthedocs.io/en/latest/developer_guide/modules/segmenteditor.html)和 [Slicer 分段 NRRD 格式](https://slicer.readthedocs.io/en/latest/developer_guide/modules/segmentations.html)。
 
 ## 多肿瘤备注
 
-每个范围对应一个独立肿瘤，按备注出现顺序编号，不合并重叠、相邻或相同范围。类别可继承；支持 `2类 210-222/281-286 3类 399-420` 中没有斜杠的类别切换以及末尾斜杠。
+每个范围对应一个独立肿瘤，按备注出现顺序编号，不合并重叠、相邻或相同范围。类别可继承；支持合成示例 `2类 10-20/40-50 3类 70-85` 中没有斜杠的类别切换以及末尾斜杠。
 
 图像右上角每行显示一个肿瘤，当前帧所在行带箭头；重叠范围同时显示。跳转菜单按肿瘤提供起始、结束和范围内医生参考帧。医生 NRRD 的非空帧是参考帧候选，文件没有明确起始/关键/结束角色时不猜测其中哪帧为关键帧；重叠范围中的参考帧同时列入相关肿瘤。范围外参考帧另列。编号仅用于导航和显示，不自动匹配、创建或重命名工作分段。
 

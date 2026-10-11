@@ -21,19 +21,20 @@ def rectangle(shape=(40, 60), x=10, y=8, width=25, height=20):
 
 
 class CoreTests(unittest.TestCase):
+    # All inline case IDs and range examples below are synthetic fixtures.
     def test_range_inheritance_reversal_and_overlap(self):
-        ranges, warnings = parse_ranges("2类 138-226/325-347/4A类 229-247/426-389\\", 500)
+        ranges, warnings = parse_ranges("2类 10-30/60-70/4A类 35-45/90-55\\", 100)
         self.assertFalse(warnings)
         self.assertEqual([(r.category, r.start, r.end) for r in ranges],
-                         [("2类",138,226),("2类",325,347),("4A类",229,247),("4A类",389,426)])
-        ranges, warnings = parse_ranges("2类 210-246/4A类 244-277/279-309")
-        self.assertEqual([r.category for r in ranges if r.contains(245)], ["2类", "4A类"])
+                         [("2类",10,30),("2类",60,70),("4A类",35,45),("4A类",55,90)])
+        ranges, warnings = parse_ranges("2类 10-25/4A类 22-35/40-50")
+        self.assertEqual([r.category for r in ranges if r.contains(23)], ["2类", "4A类"])
 
     def test_individual_tumors_and_category_switch_without_slash(self):
         examples = [
-            ("2类 210-222/281-286 3类 399-420", [("2类",210,222),("2类",281,286),("3类",399,420)]),
-            ("2类  126-137/196-209/215-223/224-235/3类  215-227", [("2类",126,137),("2类",196,209),("2类",215,223),("2类",224,235),("3类",215,227)]),
-            ("2类 108-117/160-179/149-158/", [("2类",108,117),("2类",160,179),("2类",149,158)]),
+            ("2类 10-20/40-50 3类 70-85", [("2类",10,20),("2类",40,50),("3类",70,85)]),
+            ("2类  10-15/25-30/40-48/49-60/3类  40-55", [("2类",10,15),("2类",25,30),("2类",40,48),("2类",49,60),("3类",40,55)]),
+            ("2类 10-15/35-45/25-30/", [("2类",10,15),("2类",35,45),("2类",25,30)]),
         ]
         for note, expected in examples:
             with self.subTest(note=note):
@@ -41,7 +42,7 @@ class CoreTests(unittest.TestCase):
                 self.assertFalse(warnings)
                 self.assertEqual([(r.category,r.start,r.end) for r in ranges],expected)
         ranges, _ = parse_ranges(examples[1][0])
-        self.assertEqual([i for i,r in enumerate(ranges,1) if r.contains(220)], [3,5])
+        self.assertEqual([i for i,r in enumerate(ranges,1) if r.contains(44)], [3,5])
         ranges, warnings = parse_ranges("2类 1-2/1-2/3-4 4A类 5-6")
         self.assertFalse(warnings)
         self.assertEqual(len(ranges),4)
@@ -80,11 +81,11 @@ class CoreTests(unittest.TestCase):
                 workbook_notes(p)
 
     def test_actual_workbook(self):
-        root = Path(os.environ.get("BREAST_CONTOUR_DATA", "/home/caesar/Projects/ohslicer"))
+        root = Path(os.environ.get("BREAST_CONTOUR_DATA", str(Path(__file__).resolve().parents[1])))
         if not (root/"segmentations.xlsx").exists():
             self.skipTest("sample data unavailable")
         cases = discover_cases(root)
-        self.assertEqual(len(cases), 4)
+        self.assertGreater(len(cases), 0)
         for case in cases:
             self.assertFalse(case.warnings)
             self.assertTrue(case.image.exists())

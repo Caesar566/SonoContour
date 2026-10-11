@@ -51,3 +51,16 @@ _CPack_Packages/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local credentials and assistant configuration
+.env
+.env.*
+!.env.example
+/.aws/
+/.codex/
+/.agents/
+*.pem
+*.key
+
+# Extracted public source bundle
+/SonoContour-public/
