@@ -4,6 +4,8 @@ set(MODULE_PYTHON_SCRIPTS
   BreastContourLib/__init__.py
   BreastContourLib/core.py
   BreastContourLib/runtime.py
+  BreastContourLib/smart_contour.py
+  BreastContourEffects/SegmentEditorSmartContourEffect.py
 )
 slicerMacroBuildScriptedModule(
   NAME ${MODULE_NAME}

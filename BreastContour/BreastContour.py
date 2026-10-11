@@ -27,6 +27,14 @@ class BreastContour(ScriptedLoadableModule):
 class BreastContourWidget(ScriptedLoadableModuleWidget):
     def setup(self):
         super().setup()
+        if not getattr(slicer.modules, "_breastContourSmartRegistered", False):
+            import qSlicerSegmentationsEditorEffectsPythonQt as effects
+            adapter = effects.qSlicerSegmentEditorScriptedEffect(None)
+            # Slicer loads scripted effects under their parent directory name.
+            # Keep effects outside BreastContourLib so its package is preserved.
+            adapter.setPythonSource(str(Path(__file__).parent / "BreastContourEffects" / "SegmentEditorSmartContourEffect.py").replace("\\", "/"))
+            adapter.self().register()
+            slicer.modules._breastContourSmartRegistered = True
         self.session = CaseSession(self.on_data_changed)
         self.cases = []
         self.current_index = -1
@@ -39,6 +47,8 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         self._active = False
         self._frame = 0
         self._last_effect = None
+        self._space_smart = False
+        self._space_restore_effect = ""
         self.shortcuts = []
 
         data_group = ctk.ctkCollapsibleButton()
@@ -103,6 +113,12 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             widget.setValue(float(slicer.app.settings().value("BreastContour/" + effect + "Pixels", default)))
         brush_row.addRow("画笔直径", self.paint_size)
         brush_row.addRow("橡皮直径", self.erase_size)
+        self.smart_tolerance = qt.QSpinBox()
+        self.smart_tolerance.setRange(1, 100)
+        self.smart_tolerance.setValue(int(slicer.app.settings().value("BreastContour/SmartTolerance", 15)))
+        self.smart_tolerance.setToolTip("图像中按住空格临时启用智能标注，松开恢复原工具；滚轮调节边界阈值；左键确认；Esc 清除预览")
+        self.smart_tolerance.connect("valueChanged(int)", self.smart_tolerance_changed)
+        brush_row.addRow("智能轮廓边界容忍度", self.smart_tolerance)
         panel_layout.addLayout(brush_row)
         self.doctor_visible = qt.QCheckBox("显示医生原始轮廓（半透明参考）")
         self.doctor_visible.setChecked(True)
@@ -113,7 +129,7 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         self.empty_editor_node = slicer.vtkMRMLSegmentEditorNode()
         self.editor.setMRMLSegmentEditorNode(self.empty_editor_node)
         self.editor.setMRMLScene(slicer.mrmlScene)
-        self.editor.setEffectNameOrder(["Paint", "Erase"])
+        self.editor.setEffectNameOrder(["Paint", "Erase", "SmartContour"])
         self.editor.unorderedEffectsVisible = False
         self.editor.setSegmentationNodeSelectorVisible(False)
         self.editor.setSourceVolumeNodeSelectorVisible(False)
@@ -173,6 +189,7 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             self.editor.setActiveEffectByName("Paint")
 
     def exit(self):
+        self.end_space_smart()
         self._active = False
         self.editor.setActiveEffectByName("")
         self.editor.removeViewObservations()
@@ -298,6 +315,7 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             slicer.app.restoreOverrideCursor()
 
     def detach(self):
+        self.end_space_smart()
         self.clear_overlay()
         if self._slice_observer:
             self._slice_observer[0].RemoveObserver(self._slice_observer[1])
@@ -431,11 +449,59 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         slicer.app.settings().setValue("BreastContour/" + effect + "Pixels", value)
         self.apply_brush()
 
+    def begin_space_smart(self):
+        if self._space_smart or not self._active or not self.session.case:
+            return
+        effect = self.editor.activeEffect()
+        self._space_restore_effect = effect.name if effect else ""
+        self._space_smart = True
+        self.editor.setActiveEffectByName("SmartContour")
+        self.on_effect_changed()
+        effect = self.editor.activeEffect()
+        if effect and effect.name == "SmartContour":
+            # Preview at the last image mouse position without requiring movement.
+            effect.self().processInteractionEvents(
+                self.slice_widget.sliceView().interactor(),
+                vtk.vtkCommand.MouseMoveEvent, self.slice_widget)
+        else:
+            self.end_space_smart()
+
+    def end_space_smart(self):
+        if not self._space_smart:
+            return
+        restore = self._space_restore_effect
+        self._space_smart = False
+        self._space_restore_effect = ""
+        effect = self.editor.activeEffect()
+        if effect and effect.name == "SmartContour":
+            effect.self().clear()
+        self.editor.setActiveEffectByName(restore)
+        self.on_effect_changed()
+
     def on_effect_changed(self):
         effect = self.editor.activeEffect()
         self._last_effect = effect.name if effect else None
+        if effect and effect.name == "SmartContour":
+            implementation = effect.self()
+            implementation.message_callback = self.smart_message
+            implementation.threshold_callback = self.sync_smart_tolerance
+            implementation.set_tolerance(self.smart_tolerance.value)
         self.apply_brush()
         self.hide_native_options()
+
+    def smart_message(self, message):
+        self.status.text = message
+
+    def sync_smart_tolerance(self, value):
+        old = self.smart_tolerance.blockSignals(True)
+        self.smart_tolerance.setValue(value)
+        self.smart_tolerance.blockSignals(old)
+
+    def smart_tolerance_changed(self, value):
+        slicer.app.settings().setValue("BreastContour/SmartTolerance", value)
+        effect = self.editor.activeEffect() if hasattr(self, "editor") else None
+        if effect and effect.name == "SmartContour":
+            effect.self().set_tolerance(value)
 
     def hide_native_options(self):
         # Native options include shared size and sphere controls; our two pixel
@@ -487,6 +553,8 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
     def run_check(self):
         if not self.session.case:
             return None
+        effect = self.editor.activeEffect()
+        restore_effect = effect.name if effect else "Paint"
         self.editor.setActiveEffectByName("")
         slicer.app.setOverrideCursor(qt.Qt.WaitCursor)
         self.status.text = "正在检查轮廓…"
@@ -505,7 +573,7 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             return None
         finally:
             slicer.app.restoreOverrideCursor()
-            self.editor.setActiveEffectByName("Paint")
+            self.editor.setActiveEffectByName(restore_effect)
             self.on_effect_changed()
 
     def issue_selected(self, index):
@@ -531,6 +599,8 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             box.exec()
             if box.clickedButton() != proceed:
                 return False
+        effect = self.editor.activeEffect()
+        restore_effect = effect.name if effect else "Paint"
         slicer.app.setOverrideCursor(qt.Qt.WaitCursor)
         self.editor.setActiveEffectByName("")
         try:
@@ -542,7 +612,7 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             return False
         finally:
             slicer.app.restoreOverrideCursor()
-            self.editor.setActiveEffectByName("Paint")
+            self.editor.setActiveEffectByName(restore_effect)
             self.on_effect_changed()
 
     def on_scene_close(self, caller=None, event=None):
@@ -559,8 +629,57 @@ class SaveKeyFilter(qt.QObject):
         self.widget = widget
 
     def eventFilter(self, obj, event):
+        kind = event.type()
+        widget = self.widget
+        # Release may arrive after focus moved or a dialog/module opened.
+        if widget._space_smart:
+            if kind in (qt.QEvent.ApplicationDeactivate, qt.QEvent.WindowDeactivate):
+                widget.end_space_smart()
+            elif kind == qt.QEvent.Show and obj.inherits("QDialog"):
+                widget.end_space_smart()
+            elif kind == qt.QEvent.KeyRelease and event.key() == qt.Qt.Key_Space:
+                if not event.isAutoRepeat():
+                    widget.end_space_smart()
+                event.accept()
+                return True
         if not self.widget._active or not self.widget.session.case or slicer.app.activeModalWidget():
             return False
+        if kind in (qt.QEvent.ShortcutOverride, qt.QEvent.KeyPress) and event.key() == qt.Qt.Key_Space:
+            if widget._space_smart:
+                event.accept()
+                return True
+            if event.modifiers() != qt.Qt.NoModifier:
+                return False
+            # Preserve ordinary spaces and button activation in the Qt panel.
+            target = obj
+            in_image = False
+            editing_text = False
+            while target is not None:
+                if any(target.inherits(name) for name in
+                       ("QLineEdit", "QAbstractSpinBox", "QTextEdit", "QPlainTextEdit")):
+                    editing_text = True
+                if target == getattr(widget, "slice_widget", None):
+                    in_image = True
+                    break
+                target = target.parent()
+            focus = slicer.app.focusWidget()
+            while focus is not None:
+                if any(focus.inherits(name) for name in
+                       ("QLineEdit", "QAbstractSpinBox", "QTextEdit", "QPlainTextEdit")):
+                    editing_text = True
+                    break
+                focus = focus.parent()
+            if editing_text:
+                return False
+            if not in_image and not editing_text and hasattr(widget, "slice_widget"):
+                view = widget.slice_widget.sliceView()
+                in_image = view.isVisible() and view.rect.contains(view.mapFromGlobal(qt.QCursor.pos()))
+            if not in_image:
+                return False
+            event.accept()
+            if kind == qt.QEvent.KeyPress and not event.isAutoRepeat():
+                widget.begin_space_smart()
+            return True
         if event.type() in (qt.QEvent.ShortcutOverride, qt.QEvent.KeyPress):
             if event.key() in (qt.Qt.Key_S, qt.Qt.Key_Z) and event.modifiers() == qt.Qt.ControlModifier:
                 event.accept()
