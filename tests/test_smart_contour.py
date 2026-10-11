@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 from scipy import ndimage as ndi
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'BreastContour'))
-from BreastContourLib.smart_contour import prepare_frame, compute_candidate, candidate_from_prepared
+from BreastContourLib.smart_contour import prepare_frame, compute_candidate, candidate_from_prepared, complete_region
 from BreastContourLib.core import contour_problems
 
 
@@ -146,10 +146,48 @@ class SmartTests(unittest.TestCase):
         self.assertFalse(compute_candidate(scene(),(60,180)).valid)
 
     def test_leak_and_border(self):
-        self.assertFalse(compute_candidate(scene(),(20,170),100).valid)
+        leak = compute_candidate(scene(),(20,170),100)
+        self.assertFalse(leak.valid)
+        self.assertTrue(leak.contour.any())
         image=scene(); image[40:80,0:30]=60
         c=compute_candidate(image,(60,15),15)
-        self.assertFalse(c.valid); self.assertIn('边缘',c.reason)
+        self.assert_single_hole(c); self.assertIn('边缘',c.reason)
+        self.assertTrue(c.contour[:,0].any())
+
+    def test_all_image_edges_show_clipped_closed_outline(self):
+        for side in ('left','right','top','bottom'):
+            image = np.full((100,140),200.0)
+            slices = {'left': (slice(30,70),slice(0,30)),
+                      'right': (slice(30,70),slice(110,140)),
+                      'top': (slice(0,30),slice(50,90)),
+                      'bottom': (slice(70,100),slice(50,90))}
+            seeds = {'left': (50,10),'right': (50,130),'top': (10,70),'bottom': (90,70)}
+            image[slices[side]] = 20
+            with self.subTest(side=side):
+                c = candidate_from_prepared(image,seeds[side],15)
+                self.assert_single_hole(c)
+                self.assertTrue(np.all(c.region[slices[side]]))
+                self.assertIn('图像外范围未知',c.reason)
+
+    def test_completion_preserves_both_lobes(self):
+        region = np.zeros((70,100),bool)
+        region[20:45,15:35] = True
+        region[20:45,60:80] = True
+        region[32,35:60] = True
+        completed, contour, repaired, single = complete_region(region)
+        self.assertTrue(repaired);self.assertTrue(single)
+        self.assertTrue(np.all(completed[region]))
+        self.assertEqual(ndi.label(ndi.binary_fill_holes(contour) & ~contour)[1],1)
+
+    def test_convex_completion_for_disconnected_intermediate_parts(self):
+        region = np.zeros((70,100),bool)
+        region[20:45,15:35] = True
+        region[20:45,65:85] = True
+        completed, contour, repaired, single = complete_region(region)
+        self.assertTrue(repaired);self.assertTrue(single)
+        self.assertTrue(np.all(completed[region]))
+        self.assertTrue(completed[32,50])
+        self.assertEqual(ndi.label(ndi.binary_fill_holes(contour) & ~contour)[1],1)
 
     def test_small_and_large(self):
         prepared=np.ones((100,100))*100;prepared[50,50]=0
@@ -157,6 +195,7 @@ class SmartTests(unittest.TestCase):
         prepared[10:90,10:90]=0
         c=candidate_from_prepared(prepared,(50,50),1)
         self.assertFalse(c.valid);self.assertIn('30%',c.reason)
+        self.assertTrue(c.contour.any())
 
     def test_holes_filled_for_candidate_only(self):
         image=scene();image[57:64,62:69]=170

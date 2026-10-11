@@ -133,6 +133,7 @@ def synthetic(widget,folder):
     image=np.full((3,120,180),170,dtype=np.uint8)
     y,x=np.indices((120,180));mask=((y-60)/22)**2+((x-65)/30)**2<=1
     image[:,mask]=60;image[:,45:75,120:145]=60;image[:,5:10,5:10]=230
+    image[:,35:75,0:20]=60
     session.shape=image.shape
     session.volume=slicer.mrmlScene.AddNewNodeByClass('vtkMRMLScalarVolumeNode')
     slicer.util.updateVolumeFromArray(session.volume,image);session.volume.SetSpacing(0.1,0.1,1)
@@ -201,8 +202,30 @@ def synthetic(widget,folder):
     widget.run_check()
     assert widget.editor.activeEffect().name == 'SmartContour'
     temporary_smart(widget)
+    widget.editor.setCurrentSegmentID('first')
+    widget.go_to_frame(0)
+    widget.smart_tolerance.value = 15
+    space_key(widget,qt.QEvent.KeyPress)
+    event_at(widget,55,10,vtk.vtkCommand.MouseMoveEvent);wait_events()
+    effect = widget.editor.activeEffect().self()
+    assert effect.candidate.valid and '图像外范围未知' in effect.candidate.reason
+    assert effect.actor.GetVisibility() and effect.candidate.contour[:,0].any()
+    event_at(widget,55,10,vtk.vtkCommand.LeftButtonPressEvent)
+    event_at(widget,55,10,vtk.vtkCommand.LeftButtonReleaseEvent)
+    assert session.array('first')[0,:,0].any()
+    session.save();reopened=slicer.util.loadSegmentation(str(session.case.output))
+    try:np.testing.assert_array_equal(session.array('first',reopened),session.array('first'))
+    finally:remove_node(reopened)
+    before = session.array('first').copy()
+    widget.smart_tolerance.value = 100
+    event_at(widget,110,170,vtk.vtkCommand.MouseMoveEvent);wait_events()
+    assert effect.candidate is not None and not effect.candidate.valid
+    assert effect.candidate.contour.any() and effect.actor.GetVisibility()
+    assert not effect.confirm()
+    np.testing.assert_array_equal(session.array('first'),before)
+    space_key(widget,qt.QEvent.KeyRelease)
     widget.detach();session.close()
-    return {'native_hover':'passed','wheel_isolation':'passed','single_frame_contour_only':'passed','duplicate_undo':'passed','multi_tumor_add':'passed','frame_segment_escape_leave_cleanup':'passed','save_roundtrip':'passed','space_hold_restore_repeat_focus_and_confirm':'passed'}
+    return {'native_hover':'passed','wheel_isolation':'passed','single_frame_contour_only':'passed','duplicate_undo':'passed','multi_tumor_add':'passed','frame_segment_escape_leave_cleanup':'passed','save_roundtrip':'passed','space_hold_restore_repeat_focus_and_confirm':'passed','edge_preview_confirm_roundtrip':'passed','oversized_visible_without_confirmation':'passed'}
 
 
 def real_case(widget,folder):

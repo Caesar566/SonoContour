@@ -162,6 +162,35 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"old")
             self.assertEqual(sorted(p.name for p in Path(d).iterdir()), ["Segment.nrrd"])
 
+    def test_atomic_windows_flush_requires_writable_handle(self):
+        # Emulate Windows' writable-handle requirement on any test platform.
+        original_open = Path.open
+        original_fsync = os.fsync
+        streams = {}
+        flushed = []
+        def tracked_open(path, *args, **kwargs):
+            stream = original_open(path, *args, **kwargs)
+            streams[stream.fileno()] = stream
+            return stream
+        def windows_fsync(fd):
+            stream = streams[fd]
+            if not stream.writable():
+                raise OSError(9, "Bad file descriptor")
+            flushed.append(stream.name)
+            original_fsync(fd)
+        with tempfile.TemporaryDirectory(prefix="中文 病例-") as d:
+            target = Path(d)/"Segment.nrrd"
+            with patch.object(Path, "open", tracked_open), patch("BreastContourLib.core.os.fsync", windows_fsync):
+                self.assertIsNone(atomic_save(target, lambda p: p.write_bytes(b"first"),
+                    lambda p: self.assertEqual(p.read_bytes(), b"first")))
+                self.assertEqual(target.read_bytes(), b"first")
+                backup = atomic_save(target, lambda p: p.write_bytes(b"second"),
+                    lambda p: self.assertEqual(p.read_bytes(), b"second"))
+                self.assertEqual(target.read_bytes(), b"second")
+                self.assertEqual(backup.read_bytes(), b"first")
+            self.assertEqual(len(flushed), 3)
+            self.assertFalse(list(Path(d).glob(".Segment-*")))
+
     def test_atomic_writer_and_replace_failure(self):
         with tempfile.TemporaryDirectory() as d:
             target = Path(d)/"Segment.nrrd"

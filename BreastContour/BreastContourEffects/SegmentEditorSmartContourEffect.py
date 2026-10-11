@@ -207,8 +207,14 @@ class SegmentEditorSmartContourEffect(AbstractScriptedSegmentEditorEffect):
         if key != self.candidate_key:
             self.candidate = candidate_from_prepared(self.prepared,seed,self.tolerance)
             self.candidate_key = key
-        self.display(self.candidate.contour if self.candidate.valid else None, volume, frame)
-        self.message(f"边界容忍度 {self.tolerance} · 左键追加轮廓" if self.candidate.valid else f"边界容忍度 {self.tolerance} · {self.candidate.reason}")
+        # Keep intermediate/out-of-range candidates visible even when confirmation
+        # is disabled, so the operator can see the extent and adjust tolerance.
+        self.display(self.candidate.contour if self.candidate.contour.any() else None, volume, frame)
+        action = "左键追加轮廓" if self.candidate.valid else "仅预览，不能确认"
+        message = f"边界容忍度 {self.tolerance} · {action}"
+        if self.candidate.reason:
+            message += " · " + self.candidate.reason
+        self.message(message)
         self.last_preview_seconds = time.perf_counter()-started
 
     def display(self, contour, volume, frame):

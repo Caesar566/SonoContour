@@ -230,13 +230,15 @@ def atomic_save(target, writer, validator):
         if not temporary.stat().st_size:
             raise IOError("写入结果为空")
         validator(temporary)
-        with temporary.open("rb") as stream:
+        # Windows disk flushing requires a writable handle. r+b preserves the
+        # validated bytes without truncation and also works on POSIX systems.
+        with temporary.open("r+b") as stream:
             os.fsync(stream.fileno())
         if target.exists():
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
             backup = target.with_name(f"Segment.backup-{stamp}.nrrd")
             shutil.copy2(target, backup)
-            with backup.open("rb") as stream:
+            with backup.open("r+b") as stream:
                 os.fsync(stream.fileno())
         os.replace(temporary, target)
         return backup

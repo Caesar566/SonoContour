@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import numpy as np
 from scipy import ndimage as ndi
+from scipy.spatial import ConvexHull, QhullError
 
 
 @dataclass
@@ -10,6 +11,51 @@ class Candidate:
     contour: np.ndarray
     valid: bool
     reason: str = ""
+
+
+def complete_region(region):
+    """Add missing connections without dropping lobes; return a single-hole rim."""
+    connectivity = ndi.generate_binary_structure(2, 1)
+    region = np.asarray(region, dtype=bool).copy()
+    def outline(mask):
+        contour = mask & ~ndi.binary_erosion(mask, structure=connectivity)
+        holes = ndi.binary_fill_holes(contour, structure=connectivity) & ~contour
+        single = (ndi.label(holes, connectivity)[1] == 1 and
+                  ndi.label(contour, np.ones((3,3), dtype=np.uint8))[1] == 1)
+        return contour, single
+    contour, single = outline(region)
+    if single:
+        return region, contour, False, True
+    # Widen thin connections locally instead of retaining only the largest lobe.
+    for _ in range(3):
+        region = ndi.binary_fill_holes(ndi.binary_dilation(region, structure=connectivity),
+                                       structure=connectivity)
+        contour, single = outline(region)
+        if single:
+            return region, contour, True, True
+    # Last resort: enclose the intermediate region with a convex envelope.
+    # Scan-line rasterization includes existing pixels and clips at the image edge.
+    y, x = np.nonzero(region & ~ndi.binary_erosion(region, structure=connectivity))
+    try:
+        points = np.column_stack((x,y))
+        vertices = points[ConvexHull(points).vertices]
+        other = np.roll(vertices, -1, axis=0)
+        for row in range(int(y.min()), int(y.max())+1):
+            crosses = (np.minimum(vertices[:,1],other[:,1]) <= row) & (np.maximum(vertices[:,1],other[:,1]) >= row)
+            nonhorizontal = crosses & (vertices[:,1] != other[:,1])
+            start, end = vertices[nonhorizontal], other[nonhorizontal]
+            intersections = start[:,0]+(row-start[:,1])*(end[:,0]-start[:,0])/(end[:,1]-start[:,1])
+            horizontal = vertices[crosses & (vertices[:,1] == other[:,1]),0]
+            values = np.concatenate((intersections,horizontal))
+            if values.size:
+                left = max(0,int(np.floor(values.min())))
+                right = min(region.shape[1]-1,int(np.ceil(values.max())))
+                region[row,left:right+1] = True
+        region = ndi.binary_fill_holes(region, structure=connectivity)
+        contour, single = outline(region)
+    except (ValueError, QhullError):
+        pass
+    return region, contour, True, single
 
 
 def prepare_frame(frame):
@@ -58,14 +104,14 @@ def candidate_from_prepared(prepared, seed, tolerance=15):
         return Candidate(empty, empty, False, "附近低回声区域边界变化过强，请移动鼠标或增大容忍度")
     region = labels == label
     touches = lambda a: bool(a[0].any() or a[-1].any() or a[:,0].any() or a[:,-1].any())
-    # Do not let closing silently trim a leaked component off the frame edge.
-    if touches(region):
-        return Candidate(region, empty, False, "候选接触图像边缘，请减小容忍度或移动鼠标")
-    region = ndi.binary_closing(region, structure=connectivity, iterations=1)
+    # Padding preserves observed pixels at the edge during gap completion.
+    padded = ndi.binary_closing(np.pad(region, 2), structure=connectivity, iterations=1)
+    region |= padded[2:-2,2:-2]
     region = ndi.binary_fill_holes(region, structure=connectivity)
     count = int(region.sum())
     if count < 9:
-        return Candidate(region, empty, False, "候选小于 9 像素")
+        region, contour, _, _ = complete_region(region)
+        return Candidate(region, contour, False, "候选小于 9 像素，仅预览；请调整位置或容忍度")
     # Gradient stopping leaves the core on the dark side of a blurred edge.
     # Recover its transition band using local dark/bright contrast, rather
     # than leaving the outline inset in the low-echo area. Limit refinement
@@ -83,30 +129,18 @@ def candidate_from_prepared(prepared, seed, tolerance=15):
     # Store the outside pixel rim: dark tissue remains inside, while the
     # contour occupies the adjacent high-echo side of the interface.
     region = ndi.binary_dilation(region, structure=connectivity)
-    count = int(region.sum())
-    if count > h*w*0.30:
-        return Candidate(region, empty, False, "候选超过图像面积的 30%，请减小容忍度")
+    region, contour, repaired, single = complete_region(region)
+    warnings = []
+    if repaired:
+        warnings.append("已自动补全连接，请复核补全部分")
     if touches(region):
-        return Candidate(region, empty, False, "候选接触图像边缘")
-    # Thin bridges can divide an outlined region into several enclosed holes.
-    # Keep the main interior and rebuild its one-pixel outer boundary.
-    interior = ndi.binary_erosion(region, structure=connectivity)
-    labels, interiors = ndi.label(interior, connectivity)
-    if not interiors:
-        return Candidate(region, empty, False, "候选没有有效内部区域")
-    if interiors > 1:
-        sizes = np.bincount(labels.ravel()); sizes[0] = 0
-        interior = labels == int(sizes.argmax())
-        region = ndi.binary_fill_holes(ndi.binary_dilation(interior, structure=connectivity),
-                                       structure=connectivity)
-        if int(region.sum()) < 9:
-            return Candidate(region, empty, False, "候选小于 9 像素")
-    contour = region & ~ndi.binary_erosion(region, structure=connectivity)
-    holes = ndi.binary_fill_holes(contour, structure=connectivity) & ~contour
-    if (ndi.label(holes, connectivity)[1] != 1 or
-            ndi.label(contour, np.ones((3,3), dtype=np.uint8))[1] != 1):
-        return Candidate(region, empty, False, "候选无法形成单一内部空洞，请调整容忍度或位置")
-    return Candidate(region, contour, True)
+        warnings.append("候选到达图像边缘，沿边缘闭合；图像外范围未知")
+    if int(region.sum()) > h*w*0.30:
+        warnings.append("候选超过图像面积的 30%，仅预览；请减小容忍度")
+        return Candidate(region, contour, False, "；".join(warnings))
+    if not single:
+        warnings.append("未形成单一内部空洞，仅预览；请调整位置或容忍度")
+    return Candidate(region, contour, single, "；".join(warnings))
 
 
 def compute_candidate(frame, seed, tolerance=15):
