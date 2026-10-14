@@ -10,7 +10,7 @@ import vtk
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadableModuleWidget
 
 from BreastContourLib.core import discover_cases
-from BreastContourLib.runtime import CaseSession, named_segments
+from BreastContourLib.runtime import CaseSession, named_segments, annotation_status, saved_annotation_status
 
 
 class BreastContour(ScriptedLoadableModule):
@@ -37,6 +37,7 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             slicer.modules._breastContourSmartRegistered = True
         self.session = CaseSession(self.on_data_changed)
         self.cases = []
+        self._case_statuses = {}
         self.current_index = -1
         self.issues = []
         self._updating = False
@@ -62,6 +63,13 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         default_root = Path(__file__).resolve().parent.parent
         default_path = str(default_root) if (default_root / "segmentations.xlsx").exists() else ""
         self.root_path.currentPath = str(slicer.app.settings().value("BreastContour/Root", default_path))
+        self._accepted_root_path = self.root_path.currentPath
+        self._last_root_key = self.root_key(self.root_path.currentPath)
+        self._importing_root = False
+        self._auto_import_timer = qt.QTimer(self.root_path)
+        self._auto_import_timer.setSingleShot(True)
+        self._auto_import_timer.setInterval(350)
+        self._auto_import_timer.connect("timeout()", self.auto_import_root)
         data_layout.addWidget(self.root_path)
         self.import_button = qt.QPushButton("导入根目录")
         data_layout.addWidget(self.import_button)
@@ -169,6 +177,8 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         self.annotation_panel.enabled = False
 
         self.import_button.connect("clicked()", self.import_root)
+        # Connect only after restoring settings: startup remains manual.
+        self.root_path.connect("currentPathChanged(QString)", self.root_path_changed)
         self.case_combo.connect("currentIndexChanged(int)", self.select_case)
         self.previous_case.connect("clicked()", lambda: self.select_case(self.current_index-1))
         self.next_case.connect("clicked()", lambda: self.select_case(self.current_index+1))
@@ -192,14 +202,17 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
 
     def enter(self):
         self._active = True
+        self.session.protect_doctor_display = True
         self.editor.setupViewObservations()
         if self.session.case:
             self.attach_view()
             self.editor.setActiveEffectByName("Paint")
 
     def exit(self):
+        self._auto_import_timer.stop()
         self.end_space_smart()
         self._active = False
+        self.session.protect_doctor_display = False
         self.editor.setActiveEffectByName("")
         self.editor.removeViewObservations()
         self.clear_overlay()
@@ -207,6 +220,9 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             self.slice_widget.sliceController().setVisible(True)
 
     def cleanup(self):
+        self._auto_import_timer.stop()
+        self._auto_import_timer.disconnect("timeout()", self.auto_import_root)
+        self.root_path.disconnect("currentPathChanged(QString)", self.root_path_changed)
         self.detach()
         self.session.close()
         slicer.mrmlScene.RemoveObserver(self._scene_observer)
@@ -231,31 +247,72 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             return self.save()
         return box.clickedButton() == discard
 
-    def import_root(self):
-        if self._loading:
+    @staticmethod
+    def root_key(path):
+        return os.path.normcase(str(Path(path).expanduser().resolve())) if path else ""
+
+    def root_path_changed(self, path):
+        key = self.root_key(path)
+        if key == self._last_root_key:
             return
+        self._last_root_key = key
+        self._auto_import_timer.start()
+
+    def auto_import_root(self):
+        path = self.root_path.currentPath
+        if not path or not (Path(path).expanduser()/"segmentations.xlsx").is_file():
+            return
+        if not self.import_root() and self.session.case:
+            # Cancellation must leave the path and loaded case consistent.
+            old = self.root_path.blockSignals(True)
+            self.root_path.currentPath = self._accepted_root_path
+            self.root_path.blockSignals(old)
+            self._last_root_key = self.root_key(self._accepted_root_path)
+
+    def import_root(self):
+        self._auto_import_timer.stop()
+        if self._loading or self._importing_root:
+            return False
+        self._last_root_key = self.root_key(self.root_path.currentPath)
+        self._importing_root = True
+        self.import_button.enabled = False
+        self.root_path.enabled = False
         try:
             cases = discover_cases(self.root_path.currentPath)
             if not cases:
                 raise ValueError("没有找到病例")
             if not self.confirm_switch():
-                return
+                return False
             self.detach()
             self.session.close()
             self.current_index = -1
             self.cases = cases
+            self._case_statuses = {}
             self.case_combo.blockSignals(True)
             self.case_combo.clear()
             for case in cases:
                 marker = "⚠ " if case.warnings else ""
-                resume = " [已有结果]" if case.output.exists() else " [未开始]"
+                try:
+                    self._case_statuses[case.uid] = saved_annotation_status(case)
+                except Exception:
+                    self._case_statuses[case.uid] = "待确认"
+                    case.warnings.append("无法检查工作文件状态，请打开病例检查")
+                    marker = "⚠ "
+                resume = " [" + self._case_statuses[case.uid] + "]"
                 self.case_combo.addItem(marker + case.uid + resume)
                 self.case_combo.setItemData(self.case_combo.count-1, "\n".join(case.warnings), qt.Qt.ToolTipRole)
             self.case_combo.blockSignals(False)
             slicer.app.settings().setValue("BreastContour/Root", self.root_path.currentPath)
+            self._accepted_root_path = self.root_path.currentPath
             self.select_case(0)
+            return True
         except Exception as exc:
             self.error(exc)
+            return False
+        finally:
+            self._importing_root = False
+            self.import_button.enabled = True
+            self.root_path.enabled = True
 
     def select_case(self, index):
         if self._loading or index < 0 or index >= len(self.cases) or index == self.current_index:
@@ -269,6 +326,10 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         self.annotation_panel.enabled = False
         slicer.app.setOverrideCursor(qt.Qt.WaitCursor)
         try:
+            # Restore the saved status when leaving unsaved/discarded edits.
+            if self.session.case:
+                self.update_case_status(self.session.case,
+                    self._case_statuses.get(self.session.case.uid,"待确认"))
             self.detach()
             self.session.close()
             self.current_index = -1
@@ -278,9 +339,12 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             self.case_combo.setCurrentIndex(index)
             self.case_combo.blockSignals(False)
             case = self.session.case
-            self.case_combo.setItemText(index, ("⚠ " if case.warnings else "") + case.uid + (" [已有结果]" if case.output.exists() else " [未开始]"))
+            state = "无需标注" if case.annotation_exempt else annotation_status(self.session.work,case.ranges,self.session.shape[0])
+            self._case_statuses[case.uid] = state
+            self.update_case_status(case,state)
             self.case_combo.setItemData(index, "\n".join(case.warnings), qt.Qt.ToolTipRole)
-            self.note_label.text = "原始备注：" + case.note + ("\n提示：" + "；".join(case.warnings) if case.warnings else "")
+            note_text = ((case.note.strip() or "（空）") + " · 无需标注") if case.annotation_exempt else case.note
+            self.note_label.text = "原始备注：" + note_text + ("\n提示：" + "；".join(case.warnings) if case.warnings else "")
             self.editor.setMRMLSegmentEditorNode(self.session.editor_node)
             self.editor.setSegmentationNode(self.session.work)
             self.editor.setSourceVolumeNode(self.session.volume)
@@ -367,6 +431,7 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
                 annotation.GetTextProperty().SetFontFile(str(font))
                 break
         slicer.util.setSliceViewerLayers(background=self.session.volume)
+        self.set_doctor_visible(self.doctor_visible.checked)
         node = self.slice_widget.mrmlSliceNode()
         matrix = vtk.vtkMatrix4x4()
         self.session.volume.GetIJKToRASMatrix(matrix)
@@ -458,7 +523,8 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         matches = [f"肿瘤{number} · {r.category} {r.start}–{r.end}"
                    for number, r in enumerate(self.session.case.ranges, 1) if r.contains(frame)]
         locked = frame in self.session.doctor_frames
-        text = f"帧索引 {frame} · 第 {frame+1}/{self.session.shape[0]} 帧\n" + (" / ".join(matches) or "表格范围外")
+        exempt = self.session.case.annotation_exempt
+        text = f"帧索引 {frame} · 第 {frame+1}/{self.session.shape[0]} 帧\n" + ("无需标注" if exempt else (" / ".join(matches) or "表格范围外"))
         text += "\n医生参考帧 · 可重新标注" if locked else "\n可编辑"
         for number, item in enumerate(self.session.case.ranges, 1):
             if item.contains(frame):
@@ -471,7 +537,7 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             "\n".join(("▶ " if item.contains(frame) else "") +
                       f"肿瘤{number} · {item.category}：{item.start}–{item.end}"
                       for number, item in enumerate(self.session.case.ranges, 1))
-            or "未解析到标注范围，请核对原始备注")
+            or ("无需标注" if exempt else "未解析到标注范围，请核对原始备注"))
         annotation.SetText(vtk.vtkCornerAnnotation.UpperRight, range_text)
         self.slice_widget.sliceView().scheduleRender()
 
@@ -592,12 +658,22 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             self._brush_busy = False
 
     def set_doctor_visible(self, visible):
-        if self.session.doctor:
-            self.session.doctor.GetDisplayNode().SetVisibility(bool(visible))
+        self.session.set_doctor_visibility(visible)
 
     def on_data_changed(self, repaired):
         self.save_button.enabled = True
         self.status.text = "当前标注未保存；已有检查结果需重新检查。"
+
+    def update_case_status(self, case, state):
+        for index, item in enumerate(self.cases):
+            if item.uid == case.uid and index < self.case_combo.count:
+                self.case_combo.setItemText(index,("⚠ " if case.warnings else "") + case.uid + " [" + state + "]")
+                break
+
+    def checked_case_status(self, issues):
+        if self.session.case.annotation_exempt:
+            return "无需标注"
+        return "待确认" if any(i.kind == "待确认空帧" for i in issues) else "已有结果"
 
     def run_check(self):
         if not self.session.case:
@@ -610,6 +686,8 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         slicer.app.processEvents(qt.QEventLoop.ExcludeUserInputEvents)
         try:
             self.issues = self.session.check()
+            state = self.checked_case_status(self.issues)
+            self.update_case_status(self.session.case,state)
             self.issue_list.clear()
             for issue in self.issues:
                 suffix = ""
@@ -654,6 +732,9 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         self.editor.setActiveEffectByName("")
         try:
             backup = self.session.save()
+            state = self.checked_case_status(issues)
+            self._case_statuses[self.session.case.uid] = state
+            self.update_case_status(self.session.case,state)
             self.status.text = "已保存：" + str(self.session.case.output) + ("\n旧结果备份：" + backup.name if backup else "")
             return True
         except Exception as exc:

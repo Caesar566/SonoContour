@@ -43,6 +43,46 @@ def remove_node(node):
                 slicer.mrmlScene.RemoveNode(display)
 
 
+def annotation_status(node, ranges, frame_count=None):
+    """Classify frame coverage, independent of contour topology and references."""
+    occupied = set()
+    segmentation = node.GetSegmentation()
+    for sid in named_segments(node).values():
+        segment = segmentation.GetSegment(sid)
+        image = segment.GetRepresentation("Binary labelmap")
+        if image is not None and image.GetNumberOfPoints():
+            native = vtk_to_numpy(image.GetPointData().GetScalars()).reshape(image.GetDimensions()[::-1])
+            frames = np.flatnonzero(np.any(native == segment.GetLabelValue(), axis=(1,2)))
+            occupied.update(int(k)+image.GetExtent()[4] for k in frames)
+    for item in ranges:
+        start = max(0,item.start)
+        end = item.end if frame_count is None else min(item.end,frame_count-1)
+        if end >= start and sum(start <= k <= end for k in occupied) < end-start+1:
+            return "待确认"
+    return "已有结果"
+
+
+def saved_annotation_status(case):
+    if case.annotation_exempt:
+        return "无需标注"
+    if not case.output.exists():
+        return "未开始"
+    node = None
+    try:
+        node = slicer.util.loadSegmentation(str(case.output), {"show": False})
+        if node is None:
+            raise ValueError("无法读取工作标注")
+        frame_count = None
+        parameter = node.GetSegmentation().GetConversionParameter("Reference image geometry")
+        if parameter:
+            geometry = slicer.vtkOrientedImageData()
+            slicer.vtkSegmentationConverter.DeserializeImageGeometry(parameter,geometry,False)
+            frame_count = geometry.GetExtent()[5]+1
+        return annotation_status(node,case.ranges,frame_count)
+    finally:
+        remove_node(node)
+
+
 class CaseSession:
     def __init__(self, changed=None):
         self.case = self.volume = self.work = self.doctor = self.editor_node = None
@@ -54,17 +94,24 @@ class CaseSession:
         self._busy = False
         self.safety_error = None
         self._guard_pending = False
+        self._doctor_visible = True
+        self._doctor_display_busy = False
+        self._doctor_display_pending = False
+        self.protect_doctor_display = True
+        self._doctor_observed_node = None
 
     def close(self):
         for obj, tag in self._observers:
             obj.RemoveObserver(tag)
         self._observers.clear()
+        self._doctor_observed_node = None
         for node in (self.editor_node, self.work, self.doctor, self.volume):
             remove_node(node)
         self.case = self.work = self.doctor = self.volume = self.editor_node = None
         self.doctor_frames = np.array([], dtype=int)
         self.dirty = False
         self._guard_pending = False
+        self._doctor_display_pending = False
 
     def validate_geometry(self, segmentation):
         reference = vtk.vtkMatrix4x4()
@@ -120,7 +167,7 @@ class CaseSession:
             self.shape = slicer.util.arrayFromVolume(self.volume).shape
             if len(self.shape) != 3:
                 raise ValueError("DCM 未读取为三维帧堆栈")
-            case.ranges, warnings = parse_ranges(case.note, self.shape[0])
+            case.ranges, warnings = ([], []) if case.annotation_exempt else parse_ranges(case.note, self.shape[0])
             case.warnings = list(dict.fromkeys(case.warnings + warnings))
             self.doctor = doctor = slicer.util.loadSegmentation(str(case.doctor))
             if not doctor:
@@ -140,11 +187,8 @@ class CaseSession:
             self.doctor_frames = np.flatnonzero(present)
             doctor.SetName(case.uid + " 医生参考（不编辑）")
             doctor.SetSaveWithScene(False)
-            reference_display = doctor.GetDisplayNode()
-            reference_display.SetVisibility2DFill(True)
-            reference_display.SetOpacity2DFill(0.35)
-            reference_display.SetVisibility2DOutline(False)
-            reference_display.SetVisibility3D(False)
+            self._doctor_visible = True
+            self.set_doctor_visibility(True)
             if case.output.exists():
                 self.work = slicer.util.loadSegmentation(str(case.output))
                 if not self.work:
@@ -193,6 +237,66 @@ class CaseSession:
         self.editor_node.SetOverwriteMode(slicer.vtkMRMLSegmentEditorNode.OverwriteNone)
         self.editor_node.SetSourceVolumeIntensityMask(False)
         self.editor_node.EndModify(old)
+
+    def set_doctor_visibility(self, visible):
+        """Restore the entire reference display chain, without touching pixels."""
+        self._doctor_visible = bool(visible)
+        if self.doctor and self.doctor is not self._doctor_observed_node:
+            self._doctor_observed_node = self.doctor
+            self._observers.append((self.doctor, self.doctor.AddObserver(
+                slicer.vtkMRMLDisplayableNode.DisplayModifiedEvent, self._on_doctor_display_modified)))
+        self._restore_doctor_display()
+
+    def _on_doctor_display_modified(self, caller=None, event=None):
+        if self.protect_doctor_display and not self._doctor_display_busy and not self._doctor_display_pending:
+            # Repair after the native visibility transaction finishes. Reentrant
+            # setters can leave renderer caches hidden even if MRML says visible.
+            self._doctor_display_pending = True
+            qt.QTimer.singleShot(0, self._finish_doctor_display)
+
+    def _finish_doctor_display(self):
+        self._doctor_display_pending = False
+        if self.protect_doctor_display:
+            self._restore_doctor_display(force_refresh=True)
+
+    def _restore_doctor_display(self, force_refresh=False):
+        if self._doctor_display_busy or not self.doctor or not self.doctor.GetScene():
+            return
+        self._doctor_display_busy = True
+        try:
+            self.doctor.CreateDefaultDisplayNodes()
+            display = self.doctor.GetDisplayNode()
+            old = display.StartModify()
+            try:
+                display.SetVisibility(self._doctor_visible)
+                if not self._doctor_visible:
+                    return
+                # The global eye alone cannot undo hidden segments, zero
+                # opacity, 2D visibility or a restriction to another slice view.
+                display.SetVisibility2D(True)
+                display.SetOpacity(1.0)
+                display.SetVisibility2DFill(True)
+                display.SetOpacity2DFill(0.35)
+                display.SetVisibility2DOutline(False)
+                display.SetVisibility3D(False)
+                display.SetPreferredDisplayRepresentationName2D("Binary labelmap")
+                if display.GetNumberOfViewNodeIDs():
+                    display.RemoveAllViewNodeIDs()
+                segmentation = self.doctor.GetSegmentation()
+                for index in range(segmentation.GetNumberOfSegments()):
+                    sid = segmentation.GetNthSegmentID(index)
+                    if not display.GetSegmentVisibility(sid):
+                        display.SetSegmentVisibility(sid, True)
+                    if not display.GetSegmentVisibility2DFill(sid):
+                        display.SetSegmentVisibility2DFill(sid, True)
+                    if display.GetSegmentOpacity2DFill(sid) != 1.0:
+                        display.SetSegmentOpacity2DFill(sid, 1.0)
+            finally:
+                display.EndModify(old)
+            if force_refresh:
+                display.Modified()
+        finally:
+            self._doctor_display_busy = False
 
     def _on_parameters(self, caller=None, event=None):
         if self._busy:

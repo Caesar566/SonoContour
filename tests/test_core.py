@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "BreastContour"))
 import numpy as np
 from scipy import ndimage as ndi
 from BreastContourLib.core import (parse_ranges, workbook_notes, discover_cases,
-                                   contour_problems, check_arrays, atomic_save)
+                                   contour_problems, check_arrays, atomic_save, Case)
 
 
 def rectangle(shape=(40, 60), x=10, y=8, width=25, height=20):
@@ -21,6 +21,12 @@ def rectangle(shape=(40, 60), x=10, y=8, width=25, height=20):
 
 
 class CoreTests(unittest.TestCase):
+    def test_class_one_without_ranges_is_exempt(self):
+        for note in ('', '  ', '1类', ' 1 类 ', '１类', '1类/'):
+            self.assertTrue(Case('synthetic',Path('.'),note,in_workbook=True).annotation_exempt)
+        for note in ('11类','2类','4A类','1类 10-20','2类 10-20'):
+            self.assertFalse(Case('synthetic',Path('.'),note,in_workbook=True).annotation_exempt)
+        self.assertFalse(Case('synthetic',Path('.'),'1类',in_workbook=False).annotation_exempt)
     # All inline case IDs and range examples below are synthetic fixtures.
     def test_range_inheritance_reversal_and_overlap(self):
         ranges, warnings = parse_ranges("2类 10-30/60-70/4A类 35-45/90-55\\", 100)

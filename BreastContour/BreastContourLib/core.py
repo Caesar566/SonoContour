@@ -30,6 +30,12 @@ class Case:
     note: str = ""
     ranges: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
+    in_workbook: bool = False
+
+    @property
+    def annotation_exempt(self):
+        note = re.sub(r"\s+", "", self.note)
+        return self.in_workbook and (not note or re.fullmatch(r"[1１]类[/／\\]*", note) is not None)
 
     @property
     def image(self):
@@ -135,8 +141,9 @@ def discover_cases(root):
     ids = set(notes) | {p.name for p in root.iterdir() if p.is_dir() and re.fullmatch(r"2\.25\.\d+", p.name)}
     cases = []
     for uid in sorted(ids):
-        case = Case(uid, root / uid, notes.get(uid, ""))
-        case.ranges, case.warnings = parse_ranges(case.note)
+        case = Case(uid, root / uid, notes.get(uid, ""), in_workbook=uid in notes)
+        if not case.annotation_exempt:
+            case.ranges, case.warnings = parse_ranges(case.note)
         if uid not in notes:
             case.warnings.append("阶段三表格中缺少该病例")
         for path in (case.image, case.doctor):

@@ -91,13 +91,20 @@ def run():
             widget.doctor_visible.checked = True
             assert widget.session.doctor.GetDisplayNode().GetVisibility()
             print('BRUSH_SIZES_PASSED', flush=True)
-            for frame in [0, 138, 225, 499]:
+            frame_count = widget.session.shape[0]
+            for frame in [0, min(10,frame_count-1), min(25,frame_count-1), frame_count-1]:
                 widget.go_to_frame(frame)
                 assert widget._frame == frame
                 assert widget.frame_spin.value == frame
-                assert f'第 {frame+1}/500' in widget.frame_label.text
-            widget.slice_widget.sliceLogic().SetSliceOffset(226)
-            assert widget._frame == 226, widget._frame
+                assert f'第 {frame+1}/{frame_count}' in widget.frame_label.text
+            target_frame = min(26,frame_count-1)
+            matrix = vtk.vtkMatrix4x4()
+            widget.session.volume.GetIJKToRASMatrix(matrix)
+            point = matrix.MultiplyPoint((0,0,target_frame,1))
+            plane = widget.slice_widget.mrmlSliceNode().GetSliceToRAS()
+            offset = sum(point[i]*plane.GetElement(i,2) for i in range(3))
+            widget.slice_widget.sliceLogic().SetSliceOffset(offset)
+            assert widget._frame == target_frame, widget._frame
             print('NAVIGATION_PASSED', flush=True)
             # Native Paint and undo can edit former doctor frames in the work node.
             name = next(iter(named_segments(widget.session.work)))

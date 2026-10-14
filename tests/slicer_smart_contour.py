@@ -272,6 +272,18 @@ def real_case(widget,folder):
     widget.session.load(Case(source.uid,folder,source.note,source.ranges))
     effect=bind(widget)
     session=widget.session
+    display = session.doctor.GetDisplayNode()
+    doctor_sid = next(iter(named_segments(session.doctor).values()))
+    display.SetSegmentVisibility(doctor_sid,False)
+    display.SetOpacity(0)
+    display.AddViewNodeID('unrelated-view')
+    wait_events()
+    assert display.GetSegmentVisibility(doctor_sid)
+    assert display.GetOpacity() == 1.0 and display.GetNumberOfViewNodeIDs() == 0
+    widget.doctor_visible.checked = False
+    assert not display.GetVisibility()
+    widget.doctor_visible.checked = True
+    assert display.GetVisibility()
     image=slicer.util.arrayFromVolume(session.volume)
     found=None
     # Search inside a doctor's outlined region, without changing doctor data.
@@ -309,7 +321,7 @@ def real_case(widget,folder):
     finally:remove_node(reopened)
     assert hashlib.sha256(source.doctor.read_bytes()).hexdigest()==doctor_digest
     widget.detach();session.close()
-    return {'real_case_roundtrip':'passed','doctor_unchanged':True,'preview_seconds':preview_seconds,'confirm_seconds':confirm_seconds,'pixels':int(expected.sum()),'manual_boundary_acceptance':'pending'}
+    return {'real_case_roundtrip':'passed','doctor_unchanged':True,'doctor_display_recovery':'passed','preview_seconds':preview_seconds,'confirm_seconds':confirm_seconds,'pixels':int(expected.sum()),'manual_boundary_acceptance':'pending'}
 
 
 def run():
