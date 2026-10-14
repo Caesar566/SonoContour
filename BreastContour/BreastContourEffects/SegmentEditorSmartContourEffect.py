@@ -32,6 +32,7 @@ class SegmentEditorSmartContourEffect(AbstractScriptedSegmentEditorEffect):
         self.threshold_callback = None
         self.tolerance = max(1,min(100,int(slicer.app.settings().value("BreastContour/SmartTolerance",15))))
         self.last_preview_seconds = 0
+        self.reference_radius = max(0,min(50,int(slicer.app.settings().value("BreastContour/SmartRadius",6))))
         self.parameter_observer = None
 
     def clone(self):
@@ -95,6 +96,13 @@ class SegmentEditorSmartContourEffect(AbstractScriptedSegmentEditorEffect):
         self.candidate_key = None
         if self.threshold_callback:
             self.threshold_callback(self.tolerance)
+        if self.xy is not None and self.active:
+            self.timer.start()
+
+    def set_reference_radius(self, value):
+        self.reference_radius = max(0,min(50,int(value)))
+        slicer.app.settings().setValue("BreastContour/SmartRadius", self.reference_radius)
+        self.candidate_key = None
         if self.xy is not None and self.active:
             self.timer.start()
 
@@ -203,9 +211,9 @@ class SegmentEditorSmartContourEffect(AbstractScriptedSegmentEditorEffect):
         if cache_key != self.cache_key:
             self.prepared = prepare_frame(array[frame])
             self.cache_key = cache_key
-        key = (context,seed,self.tolerance)
+        key = (context,seed,self.tolerance,self.reference_radius)
         if key != self.candidate_key:
-            self.candidate = candidate_from_prepared(self.prepared,seed,self.tolerance)
+            self.candidate = candidate_from_prepared(self.prepared,seed,self.tolerance,self.reference_radius)
             self.candidate_key = key
         # Keep intermediate/out-of-range candidates visible even when confirmation
         # is disabled, so the operator can see the extent and adjust tolerance.

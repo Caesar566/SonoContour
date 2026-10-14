@@ -43,6 +43,8 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         self._brush_busy = False
         self._loading = False
         self._slice_observer = None
+        self._wheel_observers = []
+        self._wheel_event_tags = {}
         self._brush_observer = None
         self._active = False
         self._frame = 0
@@ -119,6 +121,13 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         self.smart_tolerance.setToolTip("图像中按住空格临时启用智能标注，松开恢复原工具；滚轮调节边界阈值；左键确认；Esc 清除预览")
         self.smart_tolerance.connect("valueChanged(int)", self.smart_tolerance_changed)
         brush_row.addRow("智能轮廓边界容忍度", self.smart_tolerance)
+        self.smart_radius = qt.QSpinBox()
+        self.smart_radius.setRange(0, 50)
+        self.smart_radius.setSuffix(" 像素")
+        self.smart_radius.setValue(int(slicer.app.settings().value("BreastContour/SmartRadius", 6)))
+        self.smart_radius.setToolTip("参考区域半径：0 为鼠标单像素；6 为 13×13 像素；使用区域偏暗灰度统计，不改变边界容忍度")
+        self.smart_radius.connect("valueChanged(int)", self.smart_radius_changed)
+        brush_row.addRow("智能轮廓参考区域半径", self.smart_radius)
         panel_layout.addLayout(brush_row)
         self.doctor_visible = qt.QCheckBox("显示医生原始轮廓（半透明参考）")
         self.doctor_visible.setChecked(True)
@@ -316,6 +325,7 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
 
     def detach(self):
         self.end_space_smart()
+        self.remove_frame_wheel_observers()
         self.clear_overlay()
         if self._slice_observer:
             self._slice_observer[0].RemoveObserver(self._slice_observer[1])
@@ -329,6 +339,7 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         self.editor.setMRMLSegmentEditorNode(self.empty_editor_node)
 
     def attach_view(self):
+        self.remove_frame_wheel_observers()
         manager = slicer.app.layoutManager()
         manager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUpRedSliceView)
         self.slice_widget = manager.sliceWidget("Red")
@@ -364,14 +375,45 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         center = matrix.MultiplyPoint(((self.session.shape[2]-1)/2, (self.session.shape[1]-1)/2, 0, 1))
         self._updating = True
         node.SetSliceToRASByNTP(*(normal + transverse + list(center[:3]) + [0]))
+        # Reverse screen-up while keeping screen-right fixed. Reverse the
+        # viewing normal too to retain an orthonormal slice coordinate frame.
+        # Only the view changes; image/segmentation IJK geometry stays intact.
+        orientation = node.GetSliceToRAS()
+        for row in range(3):
+            for column in (1, 2):
+                orientation.SetElement(row, column, -orientation.GetElement(row, column))
+        node.UpdateMatrices()
         self._plane = [[node.GetSliceToRAS().GetElement(i, j) for j in range(3)] for i in range(3)]
         self._updating = False
         self.slice_widget.sliceLogic().FitSliceToAll()
         if self._slice_observer:
             self._slice_observer[0].RemoveObserver(self._slice_observer[1])
         self._slice_observer = (node, node.AddObserver(vtk.vtkCommand.ModifiedEvent, self.on_slice_changed))
+        interactor = self.slice_widget.sliceView().interactor()
+        for event in ("MouseWheelForwardEvent", "MouseWheelBackwardEvent"):
+            tag = interactor.AddObserver(event, self.on_frame_wheel, 10.0)
+            self._wheel_observers.append((interactor, tag))
+            self._wheel_event_tags[event] = tag
         target = min((r.start for r in self.session.case.ranges if r.start < self.session.shape[0]), default=0)
         self.go_to_frame(target)
+
+    def remove_frame_wheel_observers(self):
+        for interactor, tag in self._wheel_observers:
+            interactor.RemoveObserver(tag)
+        self._wheel_observers.clear()
+        self._wheel_event_tags.clear()
+
+    def on_frame_wheel(self, interactor, event):
+        if not self._active or not self.session.case:
+            return
+        effect = self.editor.activeEffect()
+        if effect and effect.name == "SmartContour":
+            return
+        if interactor.GetControlKey() or interactor.GetShiftKey() or interactor.GetAltKey():
+            return
+        self.go_to_frame(self._frame + (1 if event == "MouseWheelForwardEvent" else -1))
+        # Prevent native scrolling from applying a second, orientation-based step.
+        interactor.GetCommand(self._wheel_event_tags[event]).SetAbortFlag(1)
 
     def go_to_frame(self, frame):
         if self._updating or not self.session.case or not hasattr(self, "slice_widget"):
@@ -486,6 +528,7 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             implementation.message_callback = self.smart_message
             implementation.threshold_callback = self.sync_smart_tolerance
             implementation.set_tolerance(self.smart_tolerance.value)
+            implementation.set_reference_radius(self.smart_radius.value)
         self.apply_brush()
         self.hide_native_options()
 
@@ -502,6 +545,12 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         effect = self.editor.activeEffect() if hasattr(self, "editor") else None
         if effect and effect.name == "SmartContour":
             effect.self().set_tolerance(value)
+
+    def smart_radius_changed(self, value):
+        slicer.app.settings().setValue("BreastContour/SmartRadius", value)
+        effect = self.editor.activeEffect() if hasattr(self, "editor") else None
+        if effect and effect.name == "SmartContour":
+            effect.self().set_reference_radius(value)
 
     def hide_native_options(self):
         # Native options include shared size and sphere controls; our two pixel

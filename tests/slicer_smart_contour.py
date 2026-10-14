@@ -101,9 +101,24 @@ def temporary_smart(widget):
     assert not widget._space_smart
     widget.editor.setActiveEffectByName('Paint');widget.on_effect_changed()
     view.setFocus()
+    # Use the middle frame: wheel direction follows the slice viewing normal.
+    widget.go_to_frame(1)
     old = widget._frame
     event_at(widget,60,65,vtk.vtkCommand.MouseWheelBackwardEvent);slicer.app.processEvents()
-    assert widget._frame != old
+    assert widget._frame == old-1
+    for tool in ('Paint','Erase',''):
+        widget.editor.setActiveEffectByName(tool);widget.on_effect_changed()
+        widget.go_to_frame(1)
+        event_at(widget,60,65,vtk.vtkCommand.MouseWheelForwardEvent)
+        assert widget._frame == 2
+        event_at(widget,60,65,vtk.vtkCommand.MouseWheelForwardEvent)
+        assert widget._frame == 2
+        event_at(widget,60,65,vtk.vtkCommand.MouseWheelBackwardEvent)
+        assert widget._frame == 1
+        widget.go_to_frame(0)
+        event_at(widget,60,65,vtk.vtkCommand.MouseWheelBackwardEvent)
+        assert widget._frame == 0
+    widget.editor.setActiveEffectByName('Paint');widget.on_effect_changed()
     space_key(widget,qt.QEvent.KeyPress)
     widget.exit()
     assert not widget._space_smart and widget.editor.activeEffect() is None
@@ -120,8 +135,20 @@ def bind(widget):
     widget.frame_spin.setRange(0,widget.session.shape[0]-1)
     widget.frame_slider.setRange(0,widget.session.shape[0]-1)
     widget.attach_view()
+    # Display correction must be a vertical flip only, with original IJK intact.
+    matrix = vtk.vtkMatrix4x4();widget.session.volume.GetIJKToRASMatrix(matrix)
+    spacing = widget.session.volume.GetSpacing()
+    normal = [matrix.GetElement(i,2)/spacing[2] for i in range(3)]
+    transverse = [matrix.GetElement(i,0)/spacing[0] for i in range(3)]
+    reference = slicer.vtkMRMLSliceNode()
+    reference.SetSliceToRASByNTP(*(normal+transverse+[0,0,0]+[0]))
+    actual = widget.slice_widget.mrmlSliceNode().GetSliceToRAS()
+    for row in range(3):
+        for column, sign in ((0,1),(1,-1),(2,-1)):
+            assert abs(actual.GetElement(row,column)-sign*reference.GetSliceToRAS().GetElement(row,column)) < 1e-6
     widget.editor.setActiveEffectByName('SmartContour');widget.on_effect_changed()
     widget.smart_tolerance.value=15
+    widget.smart_radius.value=6
     # Let initial layout/slice notifications finish before injecting hover.
     wait_events(250)
     return widget.editor.activeEffect().self()
@@ -156,6 +183,14 @@ def synthetic(widget,folder):
     assert effect.poly.GetNumberOfLines() == 0, 'Diagonal preview lines create false holes'
     assert effect.poly.GetNumberOfPolys() == int(effect.candidate.contour.sum())
     assert not session.array('first').any() and not session.dirty
+    prepared = effect.prepared
+    for radius in (0,2,6):
+        widget.smart_radius.value = radius
+        wait_events()
+        assert effect.reference_radius == radius and effect.candidate_key[-1] == radius
+        assert effect.prepared is prepared
+        assert not session.array('first').any() and not session.dirty
+        assert int(slicer.app.settings().value('BreastContour/SmartRadius')) == radius
     frame=widget._frame
     event_at(widget,60,65,vtk.vtkCommand.MouseWheelForwardEvent);wait_events()
     assert widget._frame==frame and widget.smart_tolerance.value==16
@@ -261,7 +296,9 @@ def real_case(widget,folder):
         if found:break
     assert found,'no valid candidate near doctor reference on sample'
     frame,y,x,threshold=found;widget.go_to_frame(frame);widget.smart_tolerance.value=threshold
+    wait_events(250)
     event_at(widget,y,x,vtk.vtkCommand.MouseMoveEvent);wait_events(150)
+    assert effect.candidate is not None, 'preview cleared after frame/view change'
     assert effect.candidate.valid,effect.candidate.reason
     expected=effect.candidate.contour.copy();preview_seconds=effect.last_preview_seconds
     started=time.perf_counter();event_at(widget,y,x,vtk.vtkCommand.LeftButtonPressEvent);slicer.app.processEvents();confirm_seconds=time.perf_counter()-started
@@ -284,6 +321,7 @@ def run():
     original=slicer.util.errorDisplay
     settings = slicer.app.settings()
     original_tolerance = settings.value('BreastContour/SmartTolerance', None)
+    original_radius = settings.value('BreastContour/SmartRadius', None)
     slicer.util.errorDisplay=lambda message,**kwargs: (_ for _ in ()).throw(AssertionError(str(message)))
     try:
         with tempfile.TemporaryDirectory(prefix='smart-synthetic-') as d:report=synthetic(widget,Path(d))
@@ -298,6 +336,10 @@ def run():
             settings.remove('BreastContour/SmartTolerance')
         else:
             settings.setValue('BreastContour/SmartTolerance', original_tolerance)
+        if original_radius is None:
+            settings.remove('BreastContour/SmartRadius')
+        else:
+            settings.setValue('BreastContour/SmartRadius',original_radius)
 
 try:run()
 except Exception:

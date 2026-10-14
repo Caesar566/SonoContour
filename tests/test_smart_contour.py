@@ -18,6 +18,22 @@ def scene():
 
 
 class SmartTests(unittest.TestCase):
+    def test_reference_radius_switches_between_point_and_neighborhood(self):
+        image = scene()
+        image[59:62,64:67] = 170
+        prepared = prepare_frame(image)
+        point = candidate_from_prepared(prepared,(60,65),15,reference_radius=0)
+        regional = candidate_from_prepared(prepared,(60,65),15,reference_radius=6)
+        self.assert_single_hole(regional)
+        self.assertGreater(regional.region.sum(),1500)
+        self.assertFalse(np.array_equal(point.region,regional.region))
+
+    def test_reference_radius_is_clipped_at_image_edge(self):
+        image = scene()
+        for radius in (0,1,6,50):
+            c = compute_candidate(image,(0,0),reference_radius=radius)
+            self.assertEqual(c.region.shape,image.shape)
+
     def test_connected_black_block_overrides_strong_gradient(self):
         image = np.full((120,180), 220.0)
         image[35:85,35:125] = 100

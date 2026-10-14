@@ -69,7 +69,7 @@ def prepare_frame(frame):
     return ndi.gaussian_filter(normalized, sigma=1)
 
 
-def candidate_from_prepared(prepared, seed, tolerance=15):
+def candidate_from_prepared(prepared, seed, tolerance=15, reference_radius=6):
     if prepared is None:
         empty = np.zeros((0, 0), dtype=bool)
         return Candidate(empty, empty, False, "灰度变化不足，无法生成候选")
@@ -81,7 +81,8 @@ def candidate_from_prepared(prepared, seed, tolerance=15):
     tolerance = min(100, max(1, int(tolerance)))
     # The pointer chooses a neighborhood, not an intensity reference pixel.
     # Ignore bright speckle and locate the nearest representative dark pixel.
-    y0, y1, x0, x1 = max(0,y-6), min(h,y+7), max(0,x-6), min(w,x+7)
+    radius = min(50, max(0, int(reference_radius)))
+    y0, y1, x0, x1 = max(0,y-radius), min(h,y+radius+1), max(0,x-radius), min(w,x+radius+1)
     patch = prepared[y0:y1, x0:x1]
     dark_level = float(np.percentile(patch, 40))
     yy, xx = np.nonzero(patch <= dark_level)
@@ -143,5 +144,5 @@ def candidate_from_prepared(prepared, seed, tolerance=15):
     return Candidate(region, contour, single, "；".join(warnings))
 
 
-def compute_candidate(frame, seed, tolerance=15):
-    return candidate_from_prepared(prepare_frame(frame), seed, tolerance)
+def compute_candidate(frame, seed, tolerance=15, reference_radius=6):
+    return candidate_from_prepared(prepare_frame(frame), seed, tolerance, reference_radius)
