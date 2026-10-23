@@ -21,6 +21,45 @@ def rectangle(shape=(40, 60), x=10, y=8, width=25, height=20):
 
 
 class CoreTests(unittest.TestCase):
+    def test_review_category_fallback(self):
+        for category in ('4a','4A类','BI-RADS 4A','审核结果：４Ａ类'):
+            ranges,warnings = parse_ranges('10-15-20,30-40',100,category)
+            self.assertFalse(warnings)
+            self.assertEqual([r.category for r in ranges],['4A类','4A类'])
+            self.assertEqual(ranges[0].middle,15)
+        ranges,warnings = parse_ranges('2类 10-20/30-40',100,'4A')
+        self.assertFalse(warnings)
+        self.assertEqual([r.category for r in ranges],['2类','2类'])
+        self.assertTrue(parse_ranges('10-20',100,'未知')[1])
+
+    def test_workbook_adjacent_review_category(self):
+        # AA remarks must read Z, rather than another review-like column.
+        xml = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+        xml += '<row r="1"><c r="A1" t="inlineStr"><is><t>阶段三</t></is></c><c r="Z1" t="inlineStr"><is><t>审核结果</t></is></c><c r="AA1" t="inlineStr"><is><t>备注</t></is></c></row>'
+        xml += '<row r="2"><c r="C2" t="inlineStr"><is><t>2.25.123</t></is></c><c r="Y2" t="inlineStr"><is><t>2类</t></is></c><c r="Z2" t="inlineStr"><is><t>4A类</t></is></c><c r="AA2" t="inlineStr"><is><t>10-15-20,30-40</t></is></c></row></sheetData></worksheet>'
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            with zipfile.ZipFile(root/'segmentations.xlsx','w') as output:
+                output.writestr('xl/worksheets/sheet1.xml',xml)
+            case=discover_cases(root)[0]
+            self.assertEqual(case.note,'10-15-20,30-40')
+            self.assertEqual(case.review_category,'4A类')
+            self.assertEqual([r.category for r in case.ranges],['4A类','4A类'])
+    def test_three_frame_colon_notes(self):
+        ranges, warnings = parse_ranges('2:90-80-70,85-75-65',100)
+        self.assertFalse(warnings)
+        self.assertEqual([(r.category,r.start,r.middle,r.end) for r in ranges],
+                         [('2类',70,80,90),('2类',65,75,85)])
+        self.assertTrue(all(r.contains(75) for r in ranges))
+
+    def test_three_frame_mixed_notes_and_warnings(self):
+        ranges, warnings = parse_ranges('2类 10-20/4A：30-35-40，45-50-55/3类：60-70',100)
+        self.assertFalse(warnings)
+        self.assertEqual([r.category for r in ranges],['2类','4A类','4A类','3类'])
+        self.assertEqual([r.middle for r in ranges],[None,35,50,None])
+        self.assertTrue(parse_ranges('2:10-30-20',100)[1])
+        self.assertTrue(parse_ranges('2:10-110-20',100)[1])
+        self.assertEqual(len(parse_ranges('2:10-15-20-25')[0]),0)
     def test_class_one_without_ranges_is_exempt(self):
         for note in ('', '  ', '1类', ' 1 类 ', '１类', '1类/'):
             self.assertTrue(Case('synthetic',Path('.'),note,in_workbook=True).annotation_exempt)

@@ -167,7 +167,7 @@ class CaseSession:
             self.shape = slicer.util.arrayFromVolume(self.volume).shape
             if len(self.shape) != 3:
                 raise ValueError("DCM 未读取为三维帧堆栈")
-            case.ranges, warnings = ([], []) if case.annotation_exempt else parse_ranges(case.note, self.shape[0])
+            case.ranges, warnings = ([], []) if case.annotation_exempt else parse_ranges(case.note, self.shape[0], case.review_category)
             case.warnings = list(dict.fromkeys(case.warnings + warnings))
             self.doctor = doctor = slicer.util.loadSegmentation(str(case.doctor))
             if not doctor:

@@ -357,7 +357,11 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
             assigned_doctor_frames = set()
             for number, item in enumerate(case.ranges, 1):
                 title = f"肿瘤{number} · {item.category} {item.start}–{item.end}"
-                for frame, label in ((item.start, "起始"), (item.end, "结束")):
+                endpoints = [(item.start, "起始")]
+                if item.middle is not None:
+                    endpoints.append((item.middle, "中间帧"))
+                endpoints.append((item.end, "结束"))
+                for frame, label in endpoints:
                     if frame < self.session.shape[0]:
                         self.jump_combo.addItem(f"{title} · {label}：{frame}", frame)
                 for frame in self.session.doctor_frames:
@@ -535,7 +539,8 @@ class BreastContourWidget(ScriptedLoadableModuleWidget):
         annotation.SetText(vtk.vtkCornerAnnotation.UpperLeft, self.session.case.uid + "\n" + text)
         range_text = "标注范围（每行一个肿瘤，帧索引）\n" + (
             "\n".join(("▶ " if item.contains(frame) else "") +
-                      f"肿瘤{number} · {item.category}：{item.start}–{item.end}"
+                      f"肿瘤{number} · {item.category}：{item.start}–{item.end}" +
+                      (f" · 中间帧 {item.middle}" if item.middle is not None else "")
                       for number, item in enumerate(self.session.case.ranges, 1))
             or ("无需标注" if exempt else "未解析到标注范围，请核对原始备注"))
         annotation.SetText(vtk.vtkCornerAnnotation.UpperRight, range_text)

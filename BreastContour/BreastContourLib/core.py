@@ -8,8 +8,10 @@ import shutil
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
+import unicodedata
 
 import numpy as np
+from typing import Optional
 from scipy import ndimage as ndi
 
 
@@ -18,6 +20,7 @@ class FrameRange:
     category: str
     start: int
     end: int
+    middle: Optional[int] = None
 
     def contains(self, frame):
         return self.start <= frame <= self.end
@@ -31,6 +34,7 @@ class Case:
     ranges: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
     in_workbook: bool = False
+    review_category: str = ""
 
     @property
     def annotation_exempt(self):
@@ -59,27 +63,56 @@ class Issue:
     locked: bool = False
 
 
-def parse_ranges(note, frame_count=None):
+def normalize_review_category(value):
+    text = unicodedata.normalize("NFKC", str(value)).strip()
+    match = re.fullmatch(r"(?:(?:BI[- ]?RADS|审核(?:结果|类别))\s*[:：]?\s*)?([1-6][ABC]?)(?:\.0)?\s*类?", text, re.I)
+    return match[1].upper()+"类" if match else None
+
+
+def previous_excel_column(column):
+    number = 0
+    for letter in column:
+        number = number*26 + ord(letter)-ord('A')+1
+    number -= 1
+    result = ""
+    while number:
+        number, remainder = divmod(number-1,26)
+        result = chr(ord('A')+remainder)+result
+    return result
+
+
+def parse_ranges(note, frame_count=None, default_category=None):
     """One range per tumor, in note order, with inherited category."""
     ranges, warnings = [], []
-    category = None
-    note = re.sub(r"\s+(?=\d+[A-Za-z]*类)", "/", note)
-    for part in re.split(r"[/／\\\n]+", note):
+    category = normalize_review_category(default_category) if default_category else None
+    note = re.sub(r"\s+(?=\d+[A-Za-z]*(?:类|\s*[:：]))", "/", note)
+    for part in re.split(r"[/／\\\n,，]+", note):
         part = part.strip()
         if not part:
             continue
-        match = re.fullmatch(r"(?:(.+?类)\s*)?(\d+)\s*[-–—－~～]\s*(\d+)", part)
+        match = re.fullmatch(
+            r"(?:(?P<old>.+?类)\s*[:：]?\s*|(?P<short>\d+[A-Za-z]*)\s*[:：]\s*)?"
+            r"(?P<first>\d+)\s*[-–—－~～]\s*(?P<second>\d+)"
+            r"(?:\s*[-–—－~～]\s*(?P<third>\d+))?", part)
         if not match:
             warnings.append("无法解析范围：" + part)
-            if "类" in part:
+            if "类" in part or ":" in part or "：" in part:
                 category = None
             continue
-        category = match[1].strip() if match[1] else category
+        if match['old']:
+            category = match['old'].strip()
+        elif match['short']:
+            category = match['short'] + "类"
         if category is None:
             warnings.append("范围缺少类别：" + part)
             continue
-        a, b = sorted((int(match[2]), int(match[3])))
-        ranges.append(FrameRange(category, a, b))
+        middle = int(match['second']) if match['third'] is not None else None
+        a, b = sorted((int(match['first']), int(match['third'] or match['second'])))
+        ranges.append(FrameRange(category, a, b, middle))
+        if middle is not None and not a <= middle <= b:
+            warnings.append(f"中间帧 {middle} 不在范围 {a}-{b} 内，请核对备注")
+        if frame_count is not None and middle is not None and middle >= frame_count:
+            warnings.append(f"中间帧 {middle} 超出帧索引 0-{frame_count - 1}")
         if frame_count is not None and b >= frame_count:
             warnings.append(f"范围 {a}-{b} 超出帧索引 0-{frame_count - 1}")
     if not ranges:
@@ -87,7 +120,7 @@ def parse_ranges(note, frame_count=None):
     return ranges, warnings
 
 
-def workbook_notes(path):
+def workbook_notes(path, include_review=False):
     """Read only stage-three rows; supports shared and inline Excel strings."""
     ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     notes = {}
@@ -129,7 +162,9 @@ def workbook_notes(path):
                     if uid:
                         if uid in notes:
                             raise ValueError("阶段三有重复病例 ID：" + uid)
-                        notes[uid] = row.get(note_col, "")
+                        note = row.get(note_col, "")
+                        review = row.get(previous_excel_column(note_col), "")
+                        notes[uid] = (note, review) if include_review else note
     if not notes:
         raise ValueError("XLSX 中未找到阶段三的体位编号及备注记录")
     return notes
@@ -137,13 +172,15 @@ def workbook_notes(path):
 
 def discover_cases(root):
     root = Path(root).expanduser().resolve()
-    notes = workbook_notes(root / "segmentations.xlsx")
+    notes = workbook_notes(root / "segmentations.xlsx", include_review=True)
     ids = set(notes) | {p.name for p in root.iterdir() if p.is_dir() and re.fullmatch(r"2\.25\.\d+", p.name)}
     cases = []
     for uid in sorted(ids):
-        case = Case(uid, root / uid, notes.get(uid, ""), in_workbook=uid in notes)
+        note, review = notes.get(uid, ("", ""))
+        case = Case(uid, root / uid, note, in_workbook=uid in notes,
+                    review_category=normalize_review_category(review) or "")
         if not case.annotation_exempt:
-            case.ranges, case.warnings = parse_ranges(case.note)
+            case.ranges, case.warnings = parse_ranges(case.note, default_category=case.review_category)
         if uid not in notes:
             case.warnings.append("阶段三表格中缺少该病例")
         for path in (case.image, case.doctor):
