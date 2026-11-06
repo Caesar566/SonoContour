@@ -21,6 +21,119 @@ def rectangle(shape=(40, 60), x=10, y=8, width=25, height=20):
 
 
 class CoreTests(unittest.TestCase):
+    @staticmethod
+    def write_lesion_workbook(root, rows, suffix=""):
+        from xml.sax.saxutils import escape
+        xml = '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+        for number, values in enumerate(rows, 1):
+            xml += f'<row r="{number}">'
+            for col, value in values.items():
+                if isinstance(value, int):
+                    xml += f'<c r="{col}{number}"><v>{value}</v></c>'
+                else:
+                    xml += f'<c r="{col}{number}" t="inlineStr"><is><t>{escape(value)}</t></is></c>'
+            xml += '</row>'
+        xml += suffix + '</sheetData></worksheet>'
+        with zipfile.ZipFile(root/'segmentations.xlsx','w') as output:
+            output.writestr('xl/worksheets/sheet1.xml',xml)
+
+    def test_lesion_layout_inline_ranges_numeric_ids_and_exemption(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            rows=[{'A':'阶段一：病灶标注'},
+                  {'C':'体位编号','D':'birads分类','E':'病灶对应帧'},
+                  {'C':123456789012345,'D':'2类 10-20'},
+                  {'C':'123456789012346','D':'1类'},
+                  {'C':'123456789012347','D':'4A类 50-40-30,60-70'}]
+            self.write_lesion_workbook(root,rows)
+            before=(root/'segmentations.xlsx').read_bytes()
+            directory=root/str(rows[2]['C']);directory.mkdir()
+            (directory/(directory.name+'_ORI.dcm')).touch()
+            (directory/'Segmentation.nrrd').touch()
+            cases={c.uid:c for c in discover_cases(root)}
+            case=cases[str(rows[2]['C'])]
+            self.assertEqual(case.note,'2类 10-20')
+            self.assertEqual([(r.category,r.start,r.end) for r in case.ranges],[('2类',10,20)])
+            self.assertFalse(case.warnings)
+            self.assertTrue(cases[rows[3]['C']].annotation_exempt)
+            self.assertEqual(cases[rows[4]['C']].ranges[0].middle,40)
+            self.assertEqual(len(cases[rows[4]['C']].ranges),2)
+            self.assertEqual((root/'segmentations.xlsx').read_bytes(),before)
+            self.assertFalse(case.output.exists())
+
+    def test_lesion_layout_separate_frames_and_explicit_category(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            self.write_lesion_workbook(root,[
+                {'B':'体位编号','F':'BI-RADS 分类','H':'病灶对应帧'},
+                {'B':'2.25.123','F':'4A类','H':'10-15-20,30-40'},
+                {'B':'2.25.124','F':'2类','H':'3类 10-20'},
+                {'B':'2.25.125','F':'2类'}])
+            cases={c.uid:c for c in discover_cases(root)}
+            self.assertEqual([r.category for r in cases['2.25.123'].ranges],['4A类','4A类'])
+            self.assertEqual(cases['2.25.124'].ranges[0].category,'3类')
+            self.assertFalse(cases['2.25.125'].annotation_exempt)
+            self.assertTrue(cases['2.25.125'].warnings)
+
+    def test_lesion_layout_stage_three_precedence_and_section_isolation(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            rows=[{'A':'阶段一'}, {'C':'体位编号','D':'birads分类','E':'病灶对应帧'},
+                  {'C':'2.25.123','D':'2类 10-20'},
+                  {'A':'阶段二'}, {'C':'2.25.124','D':'3类 30-40'}]
+            self.write_lesion_workbook(root,rows)
+            self.assertEqual(workbook_notes(root/'segmentations.xlsx'),{'2.25.123':'2类 10-20'})
+            rows += [{'A':'阶段三'}, {'C':'体位编号','D':'审核结果','E':'备注'},
+                     {'C':'2.25.123','D':'4A类','E':'50-60'}]
+            self.write_lesion_workbook(root,rows)
+            self.assertEqual(workbook_notes(root/'segmentations.xlsx',True),{'2.25.123':('50-60','4A类')})
+
+    def test_lesion_layout_rejects_duplicate_and_incomplete_headers(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            rows=[{'C':'体位编号','D':'birads分类','E':'病灶对应帧'},
+                  {'C':'2.25.123','D':'2类 10-20'}, {'C':'2.25.123','D':'1类'}]
+            self.write_lesion_workbook(root,rows)
+            with self.assertRaisesRegex(ValueError,'重复病例'):
+                workbook_notes(root/'segmentations.xlsx')
+            rows[0].pop('E')
+            self.write_lesion_workbook(root,rows[:2])
+            with self.assertRaises(ValueError):
+                workbook_notes(root/'segmentations.xlsx')
+
+    def test_image_filename_fallback_and_original_priority(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            for uid in ('123456789012345','2.25.123'):
+                directory=root/uid;directory.mkdir()
+                case=Case(uid,directory)
+                original=directory/(uid+'_ORI.dcm')
+                plain=directory/(uid+'.dcm')
+                self.assertEqual(case.image,original)
+                plain.write_bytes(b'plain fixture')
+                self.assertEqual(case.image,plain)
+                original.write_bytes(b'original fixture')
+                self.assertEqual(case.image,original)
+                self.assertEqual(plain.read_bytes(),b'plain fixture')
+                self.assertEqual(original.read_bytes(),b'original fixture')
+
+    def test_discover_numeric_plain_dcm_without_doctor_or_table_record(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            self.write_lesion_workbook(root,[
+                {'C':'体位编号','D':'birads分类','E':'病灶对应帧'},
+                {'C':'123456789012345','D':'2类 10-20'}])
+            for uid in ('123456789012345','123456789012346'):
+                directory=root/uid;directory.mkdir()
+                (directory/(uid+'.dcm')).write_bytes(b'fixture')
+            cases={c.uid:c for c in discover_cases(root)}
+            self.assertEqual(len(cases),2)
+            for case in cases.values():
+                self.assertEqual(case.image.name,case.uid+'.dcm')
+                self.assertFalse(any('缺少文件' in w and '.dcm' in w for w in case.warnings))
+                self.assertIn('缺少文件：Segmentation.nrrd',case.warnings)
+            self.assertIn('表格中缺少该病例',cases['123456789012346'].warnings)
+
     def test_review_category_fallback(self):
         for category in ('4a','4A类','BI-RADS 4A','审核结果：４Ａ类'):
             ranges,warnings = parse_ranges('10-15-20,30-40',100,category)

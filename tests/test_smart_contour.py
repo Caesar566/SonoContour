@@ -43,7 +43,8 @@ class SmartTests(unittest.TestCase):
         c = candidate_from_prepared(image, (60,55), 5)
         self.assert_single_hole(c)
         interior = ndi.binary_fill_holes(c.contour) & ~c.contour
-        self.assertTrue(np.all(interior[35:85,35:125]))
+        self.assertTrue(np.all(c.region[35:85,35:125]))
+        self.assertTrue(np.all(image[c.contour] <= 100))
         self.assertFalse(c.region[60,140])
 
     def test_smoothed_connected_black_block_is_not_discarded(self):
@@ -54,7 +55,7 @@ class SmartTests(unittest.TestCase):
         self.assert_single_hole(c)
         interior = ndi.binary_fill_holes(c.contour) & ~c.contour
         black = image == 0
-        self.assertGreater(np.count_nonzero(interior & black)/black.sum(), 0.98)
+        self.assertGreater(np.count_nonzero(c.region & black)/black.sum(), 0.98)
 
     def test_disconnected_blacker_block_stays_separate(self):
         image = np.full((120,180), 220.0)
@@ -65,23 +66,23 @@ class SmartTests(unittest.TestCase):
         self.assertTrue(c.region[60,55])
         self.assertFalse(c.region[:,110:150].any())
 
-    def test_outline_on_bright_side_encloses_dark_lesion(self):
+    def test_outline_on_dark_side_tracks_low_echo_lesion(self):
         image = scene()
         dark = image < 100
         c = compute_candidate(image, (60,65), 15)
         self.assert_single_hole(c)
         interior = ndi.binary_fill_holes(c.contour) & ~c.contour
-        self.assertGreater(np.count_nonzero(interior & dark)/dark.sum(), 0.98)
-        self.assertGreater(np.mean(image[c.contour] >= 170), 0.90)
+        self.assertGreater(np.count_nonzero(c.region & dark)/dark.sum(), 0.90)
+        self.assertGreater(np.mean(image[c.contour] < 100), 0.95)
         self.assertLess(c.region.sum(), dark.sum()*1.25)
 
-    def test_sharp_interface_outline_is_outside_dark_pixels(self):
+    def test_sharp_interface_outline_is_on_dark_pixels(self):
         image = np.full((100,140), 200.0)
         image[30:70,45:95] = 40
         c = candidate_from_prepared(image, (50,65), 15)
         self.assert_single_hole(c)
-        self.assertTrue(np.all(image[c.contour] == 200))
-        self.assertTrue(np.all((ndi.binary_fill_holes(c.contour) & ~c.contour)[30:70,45:95]))
+        self.assertTrue(np.all(image[c.contour] == 40))
+        self.assertTrue(np.all(c.region[30:70,45:95]))
 
     def assert_single_hole(self, candidate):
         self.assertTrue(candidate.valid, candidate.reason)

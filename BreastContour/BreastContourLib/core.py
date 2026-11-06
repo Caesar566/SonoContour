@@ -43,7 +43,9 @@ class Case:
 
     @property
     def image(self):
-        return self.directory / (self.uid + "_ORI.dcm")
+        original = self.directory / (self.uid + "_ORI.dcm")
+        plain = self.directory / (self.uid + ".dcm")
+        return original if original.is_file() or not plain.is_file() else plain
 
     @property
     def doctor(self):
@@ -121,9 +123,11 @@ def parse_ranges(note, frame_count=None, default_category=None):
 
 
 def workbook_notes(path, include_review=False):
-    """Read only stage-three rows; supports shared and inline Excel strings."""
+    """Prefer stage-three notes; otherwise read the lesion-labeling layout."""
     ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     notes = {}
+    lesion_notes = {}
+    lesion_duplicates = set()
     with zipfile.ZipFile(path) as book:
         strings = []
         if "xl/sharedStrings.xml" in book.namelist():
@@ -147,11 +151,39 @@ def workbook_notes(path, include_review=False):
                 rows.append(values)
             in_stage = False
             note_col = None
+            lesion_columns = None
             for row in rows:
                 stage = next((v for v in row.values() if re.search(r"阶段[一二三四五六七八九十]", v)), None)
                 if stage:
                     in_stage = "阶段三" in stage
                     note_col = None
+                    lesion_columns = None
+                # This layout is identified by all three headers, not by stage
+                # number alone. Other workflow sections must not leak into it.
+                headers = {re.sub(r"[\s-]+", "", unicodedata.normalize("NFKC", value)).lower(): col
+                           for col, value in row.items()}
+                if all(key in headers for key in ("体位编号", "birads分类", "病灶对应帧")):
+                    lesion_columns = tuple(headers[key] for key in ("体位编号", "birads分类", "病灶对应帧"))
+                    continue
+                if lesion_columns:
+                    uid_col, category_col, frame_col = lesion_columns
+                    uid = row.get(uid_col, "")
+                    if re.fullmatch(r"(?:2\.25\.\d+|\d+)", uid):
+                        classification = row.get(category_col, "")
+                        frames = row.get(frame_col, "")
+                        category = normalize_review_category(classification)
+                        if not category:
+                            prefix = re.match(r"\s*([1-6][ABCabc]?\s*类)", classification)
+                            category = normalize_review_category(prefix[1]) if prefix else None
+                        # Explicit frame text wins; a category-only BI-RADS cell
+                        # supplies its fallback. With no frames, keep the cell
+                        # verbatim, including category 1 and inline ranges.
+                        note = frames or classification
+                        review = category or ""
+                        record = (note, review) if include_review else note
+                        if uid in lesion_notes:
+                            lesion_duplicates.add(uid)
+                        lesion_notes[uid] = record
                 if not in_stage:
                     continue
                 for col, value in row.items():
@@ -165,15 +197,22 @@ def workbook_notes(path, include_review=False):
                         note = row.get(note_col, "")
                         review = row.get(previous_excel_column(note_col), "")
                         notes[uid] = (note, review) if include_review else note
-    if not notes:
-        raise ValueError("XLSX 中未找到阶段三的体位编号及备注记录")
-    return notes
+    if notes:
+        return notes
+    if lesion_notes:
+        if lesion_duplicates:
+            raise ValueError("病灶标注表有重复病例 ID：" + sorted(lesion_duplicates)[0])
+        return lesion_notes
+    raise ValueError("XLSX 中未找到阶段三备注或体位编号/birads分类/病灶对应帧记录")
 
 
 def discover_cases(root):
     root = Path(root).expanduser().resolve()
     notes = workbook_notes(root / "segmentations.xlsx", include_review=True)
-    ids = set(notes) | {p.name for p in root.iterdir() if p.is_dir() and re.fullmatch(r"2\.25\.\d+", p.name)}
+    ids = set(notes) | {p.name for p in root.iterdir() if p.is_dir() and (
+        re.fullmatch(r"2\.25\.\d+", p.name) or
+        (p.name.isdecimal() and (Case(p.name, p).image.is_file() or
+                                 (p / "Segmentation.nrrd").is_file())))}
     cases = []
     for uid in sorted(ids):
         note, review = notes.get(uid, ("", ""))
@@ -182,7 +221,7 @@ def discover_cases(root):
         if not case.annotation_exempt:
             case.ranges, case.warnings = parse_ranges(case.note, default_category=case.review_category)
         if uid not in notes:
-            case.warnings.append("阶段三表格中缺少该病例")
+            case.warnings.append("表格中缺少该病例")
         for path in (case.image, case.doctor):
             if not path.is_file():
                 case.warnings.append("缺少文件：" + path.name)

@@ -113,23 +113,19 @@ def candidate_from_prepared(prepared, seed, tolerance=15, reference_radius=6):
     if count < 9:
         region, contour, _, _ = complete_region(region)
         return Candidate(region, contour, False, "候选小于 9 像素，仅预览；请调整位置或容忍度")
-    # Gradient stopping leaves the core on the dark side of a blurred edge.
-    # Recover its transition band using local dark/bright contrast, rather
-    # than leaving the outline inset in the low-echo area. Limit refinement
-    # to four pixels so it cannot jump to a separate nearby dark lesion.
+    # Recover only the dark side of the blurred interface. Keep the rim on
+    # low-echo pixels instead of expanding through the bright transition band.
+    # Refinement stays within four pixels of the core to avoid nearby lesions.
     local_dark = ndi.minimum_filter(prepared, size=9)
     local_bright = ndi.maximum_filter(prepared, size=9)
     contrast = local_bright-local_dark
-    bright_side = local_dark + 0.75*contrast
+    dark_side = local_dark + 0.25*contrast
     near_core = ndi.distance_transform_edt(~region) <= 4
-    transition = ((prepared <= ceiling) |
-                  ((contrast >= 5) & (prepared <= bright_side)))
+    transition = (prepared <= ceiling) & ((contrast < 5) | (prepared <= dark_side))
     region = ndi.binary_propagation(region, structure=connectivity,
                                     mask=region | (near_core & transition))
     region = ndi.binary_fill_holes(region, structure=connectivity)
-    # Store the outside pixel rim: dark tissue remains inside, while the
-    # contour occupies the adjacent high-echo side of the interface.
-    region = ndi.binary_dilation(region, structure=connectivity)
+    # complete_region extracts the inner pixel rim without an outside dilation.
     region, contour, repaired, single = complete_region(region)
     warnings = []
     if repaired:
